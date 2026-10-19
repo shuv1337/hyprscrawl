@@ -2073,7 +2073,7 @@ fn main() -> Result<()> {
             };
             ensure!(
                 !resolved_urls.is_empty(),
-                "Could not discover a Tailscale or LAN IP; pass --url http://<host>:{port}"
+                "This trial build does not advertise LAN or Tailscale addresses (ingest listens on 127.0.0.1 only); pass --url explicitly"
             );
             let link =
                 phone::format_setup_link(&scheme, &resolved_urls, &token, session.as_deref())?;

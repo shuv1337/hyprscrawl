@@ -1127,50 +1127,13 @@ fn bearer_token(header: &str) -> Option<&str> {
     })
 }
 
-/// Discovers this Mac's candidate Scrawl ingest base URLs on `port`: Tailscale IPv4 first,
+/// trial/hardened: returns no URLs (the server is loopback-only). Upstream discovered Tailscale IPv4 first,
 /// followed by `en0` / `en1` LAN IPs.
 pub fn discover_default_ingest_urls(port: u16) -> Vec<String> {
-    let mut urls = Vec::new();
-    let push_ip = |urls: &mut Vec<String>, raw: &str| {
-        for line in raw.lines() {
-            let ip = line.trim();
-            if !ip.is_empty()
-                && ip
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-            {
-                let candidate = format!("http://{ip}:{port}");
-                if !urls.contains(&candidate) {
-                    urls.push(candidate);
-                }
-            }
-        }
-    };
-
-    for bin in [
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        "tailscale",
-    ] {
-        if let Ok(out) = Command::new(bin).args(["ip", "-4"]).output()
-            && out.status.success()
-        {
-            push_ip(&mut urls, &String::from_utf8_lossy(&out.stdout));
-            if !urls.is_empty() {
-                break;
-            }
-        }
-    }
-
-    for iface in ["en0", "en1"] {
-        if let Ok(out) = Command::new("/usr/sbin/ipconfig")
-            .args(["getifaddr", iface])
-            .output()
-            && out.status.success()
-        {
-            push_ip(&mut urls, &String::from_utf8_lossy(&out.stdout));
-        }
-    }
-    urls
+    // trial/hardened: the ingest server only listens on 127.0.0.1, so never advertise
+    // Tailscale or LAN addresses in setup links. Pass --url explicitly if ever needed.
+    let _ = port;
+    Vec::new()
 }
 
 fn normalize_http_base_url(raw: &str) -> Result<String> {
@@ -1232,7 +1195,7 @@ pub fn format_setup_link(
 }
 
 /// Starts Scrawl's background ScrawlKit ingest inside the GUI app: an HTTP server on
-/// `0.0.0.0:47777` the phone uploads to, and a cabled-iPhone `devicectl` watcher for when the
+/// `127.0.0.1:47777` (trial/hardened: loopback only, so no phone uploads over the network), and a cabled-iPhone `devicectl` watcher for when the
 /// network can't reach the Mac. Each recording becomes a `.scrawl` bundle, lands on the clipboard
 /// and is queued into the OpenCode session matching the app.
 pub fn start_ingest_server(ui_sender: flume::Sender<LiveOverlayEvent>) {
@@ -1281,7 +1244,8 @@ pub fn run_ingest_server(port: u16, usb: bool, no_opencode: bool) -> Result<()> 
 }
 
 fn serve_http(port: u16, config: IngestConfig) -> Result<()> {
-    let addr = format!("0.0.0.0:{port}");
+    // trial/hardened: loopback only (iPhone upload over LAN/Tailscale is off).
+    let addr = format!("127.0.0.1:{port}");
     let listener = std::net::TcpListener::bind(&addr)
         .with_context(|| format!("port {port} already in use"))?;
     scrawl_log(format!("ingest server listening on {addr}"));

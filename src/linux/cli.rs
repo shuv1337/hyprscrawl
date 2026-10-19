@@ -120,10 +120,13 @@ fn doctor() -> Result<()> {
     if gsr::other_running() {
         row(false, "recorder free", "a gpu-screen-recorder is running now (Omarchy recording?)".into());
     }
+    // trial/hardened: with ChatGPT transcription on, whisper.cpp is optional (word timings
+    // and fallback only), so its absence is reported but not counted as a problem.
+    let whisper_optional = crate::linux::chatgpt::enabled();
     let cli = whisper::cli();
-    row(cli.is_some(), "whisper-cli", cli.map_or("missing: omarchy-pkg-add whisper-cpp (or set SCRAWL_WHISPER_CLI)".into(), |p| p.display().to_string()));
+    row(cli.is_some() || whisper_optional, "whisper-cli", cli.map_or(format!("missing{}: omarchy-pkg-add whisper-cpp (or set SCRAWL_WHISPER_CLI)", if whisper_optional { " (optional with ChatGPT; word times estimated)" } else { "" }), |p| p.display().to_string()));
     let model = whisper::model();
-    row(model.is_some(), "whisper model", model.map_or("missing: scrawl setup transcription".into(), |p| p.display().to_string()));
+    row(model.is_some() || whisper_optional, "whisper model", model.map_or(format!("missing{}: scrawl setup transcription", if whisper_optional { " (optional with ChatGPT)" } else { "" }), |p| p.display().to_string()));
     if crate::linux::chatgpt::enabled() {
         let login = crate::linux::chatgpt::status();
         row(login.is_ok(), "ChatGPT transcription", login.map_or_else(|e| format!("{e:#}"), |()| format!("on ({})", crate::linux::chatgpt::auth_path().display())));

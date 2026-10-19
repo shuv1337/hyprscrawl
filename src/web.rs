@@ -5,8 +5,8 @@
 //! and heartbeats while the tab is open; a Mac capture of that tab is then sent to the session
 //! (`routing`). Registrations last `TTL_MS` past the last heartbeat.
 //!
-//! Without the ingest token, only a page on a loopback origin, calling from this Mac, may
-//! register, and only for its own origin. Any other origin must send the token as a bearer.
+//! trial/hardened: every registration needs the ingest token as a bearer (`data-token`),
+//! because a local non-browser process can forge a loopback `Origin`.
 //!
 //! TODO: the script could also report clicks (element label, tag, epoch time) so the bundle's
 //! Mac clicks get element names. Skipped until the recording keeps its start on the epoch clock
@@ -160,6 +160,7 @@ pub fn fetch_registrations(port: u16) -> Result<Vec<Registration>> {
 // MARK: Who may register
 
 /// A browser `Origin` on this machine: `http(s)://localhost`, `*.localhost`, `127.x`, `[::1]`.
+#[allow(dead_code)] // trial/hardened: unused since registration always needs the token (M2).
 pub fn is_loopback_origin(origin: &str) -> bool {
     parse_url(origin).is_some_and(|u| is_loopback_host(&u.host))
 }
@@ -168,7 +169,10 @@ pub fn is_loopback_origin(origin: &str) -> bool {
 /// clients can claim any `Origin`, so the peer address matters too); anything else needs the
 /// ingest token.
 pub fn may_register(origin: Option<&str>, peer_loopback: bool, token_ok: bool) -> bool {
-    token_ok || (peer_loopback && origin.is_some_and(is_loopback_origin))
+    // trial/hardened (M2): any local process can forge a loopback `Origin`, so registration
+    // always needs the ingest token (pages pass it as `data-token`).
+    let _ = (origin, peer_loopback);
+    token_ok
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -404,15 +408,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_origins_register_without_the_token_and_others_need_it() {
+    fn registration_always_needs_the_token() {
         for origin in [
             "http://localhost:5173",
             "http://127.0.0.1:3000",
             "https://app.localhost",
             "http://[::1]:8080",
         ] {
-            assert!(may_register(Some(origin), true, false), "{origin}");
-            // A non-browser client elsewhere can send any Origin.
+            // Forged loopback Origins from local processes are rejected without the token.
+            assert!(!may_register(Some(origin), true, false), "{origin}");
+            assert!(may_register(Some(origin), true, true), "{origin}");
             assert!(!may_register(Some(origin), false, false), "{origin}");
         }
         for origin in [
@@ -548,6 +553,14 @@ mod tests {
             ),
             "tok",
         );
+        assert!(ok.starts_with("HTTP/1.1 403"), "{ok}");
+        let ok = request(
+            &format!(
+                "POST /web/register HTTP/1.1\r\nOrigin: http://localhost:6123\r\nAuthorization: Bearer tok\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            "tok",
+        );
         assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
         assert!(ok.contains("Access-Control-Allow-Origin: http://localhost:6123"));
         assert_eq!(
@@ -585,7 +598,7 @@ mod tests {
 
         let unregister = request(
             &format!(
-                "POST /web/unregister HTTP/1.1\r\nOrigin: http://localhost:6123\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /web/unregister HTTP/1.1\r\nOrigin: http://localhost:6123\r\nAuthorization: Bearer tok\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
             "tok",

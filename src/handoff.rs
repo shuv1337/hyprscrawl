@@ -432,7 +432,8 @@ pub fn ensure_ingest_token() -> Result<String> {
 
 /// Whether Mac captures of a dev site go straight to its session (`autoSend`, default on).
 pub fn auto_send() -> bool {
-    config().auto_send.unwrap_or(true)
+    // trial/hardened: auto-send is opt-in (`"autoSend": true` in the config).
+    config().auto_send.unwrap_or(false)
 }
 
 /// Whether the menu offers video export (`videoExport`, default off). `scrawl export` works

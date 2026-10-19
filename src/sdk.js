@@ -2,7 +2,7 @@
 // <script src="http://127.0.0.1:47777/sdk.js" data-session="ses_…"></script>
 // or data-directory="/abs/project" to use that project's newest OpenCode session.
 // Registers this tab with Scrawl while it's open, so a Mac capture of it is sent to that
-// session. It does nothing outside localhost unless data-token (the ingest token) is set.
+// session. It does nothing unless data-token (the ingest token) is set (trial/hardened).
 (() => {
   const script = document.currentScript;
   if (!script || window.__scrawlSdk) return;
@@ -14,7 +14,8 @@
     host === "::1" ||
     /^127\./.test(host);
   const token = script.dataset.token;
-  if (!loopback && !token) return;
+  // trial/hardened: registration needs the ingest token everywhere.
+  if (!token) return;
   window.__scrawlSdk = true;
 
   const base = new URL(script.src).origin;

@@ -12,10 +12,17 @@ const USAGE: &str = "Linux commands:
   scrawl toggle               start or finish a recording (bind this to a key)
   scrawl start | stop         explicit start / finish
   scrawl pick                 drag an area or click a window, then record it
+  scrawl cancel               stop the recording and keep nothing (Esc while recording)
   scrawl status               idle, recording or finishing
+  scrawl preview [latest|BUNDLE]
+                              open the review window (Alt+Shift+R, or click the “saved” notification)
   scrawl paste [BUNDLE]       paste the contact sheet + summary of the latest (or given) capture
+  scrawl screencast start [MONITOR|all] [--no-mic] | stop | status
+                              a plain screen recording (for demos), into ~/Videos/hyprscrawl
   scrawl doctor               check what this machine has
-  scrawl hyprland-snippet     print a persistent bind for ~/.config/hypr/bindings.lua
+  scrawl hyprland-snippet     print persistent binds for ~/.config/hypr/bindings.lua
+  scrawl setup service        run the daemon as a systemd user service (starts with your session)
+  scrawl setup launcher       add “Scrawl” entries (record, review latest) to the app launcher
   scrawl setup transcription  download a whisper model (asks first)
   scrawl setup transcription chatgpt|local
                               transcribe with your ChatGPT login (Codex CLI), or locally only
@@ -41,6 +48,8 @@ pub fn intercept() -> Option<Result<()>> {
             Err(e) => Err(e),
         },
         "quit" => daemon::send("quit", false).map(|_| ()),
+        "screencast" => crate::linux::screencast::run(&args[1..]),
+        "cancel" => daemon::send("cancel", false).map(|r| println!("{r}")),
         "daemon" => daemon::run(args.iter().any(|a| a == "--record")),
         "paste" => paste(args.get(1).map(PathBuf::from)),
         "doctor" => doctor(),
@@ -49,16 +58,30 @@ pub fn intercept() -> Option<Result<()>> {
             println!("-- ~/.config/hypr/bindings.lua");
             println!("o.bind(\"{key}\", \"Scrawl: record / stop\", \"scrawl toggle\")");
             println!("o.bind(\"ALT + SHIFT + V\", \"Scrawl: paste latest\", \"scrawl paste\")");
+            println!("o.bind(\"ALT + SHIFT + R\", \"Scrawl: review latest\", \"scrawl preview latest\")");
             Ok(())
         }
+        "setup" if args.get(1).map(String::as_str) == Some("launcher") => setup_launcher(),
+        "setup" if args.get(1).map(String::as_str) == Some("service") => setup_service(),
         "setup" if args.get(1).map(String::as_str) == Some("transcription") => match args.get(2).map(String::as_str) {
             Some("chatgpt") => setup_chatgpt(true),
             Some("local") => setup_chatgpt(false),
             _ => setup_transcription(),
         },
         "debug-transcribe" => match args.get(1) {
-            Some(wav) => crate::helper::transcribe(std::path::Path::new(wav))
-                .map(|t| println!("{}", serde_json::to_string_pretty(&t).unwrap_or_default())),
+            Some(wav) => {
+                // `--decode-ms N`: prefetch, then wait N ms as the frame decode would.
+                let wav = std::path::Path::new(wav);
+                if let Some(ms) = args.iter().position(|a| a == "--decode-ms").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()) {
+                    let _ = crate::helper::prefetch(wav);
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                let started = std::time::Instant::now();
+                crate::helper::transcribe(wav).map(|t| {
+                    eprintln!("transcript ready {} ms after it was asked for", started.elapsed().as_millis());
+                    println!("{}", serde_json::to_string_pretty(&t).unwrap_or_default())
+                })
+            }
             None => Err(anyhow::anyhow!("usage: scrawl debug-transcribe <16 kHz wav>")),
         },
         "debug-events" => debug_events(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5)),
@@ -133,14 +156,78 @@ fn doctor() -> Result<()> {
     } else {
         println!("  transcription: local whisper.cpp (`scrawl setup transcription chatgpt` to use your ChatGPT login)");
     }
-    match daemon::hotkey() {
-        Some(k) => println!("  shortcut: {k} (runtime bind; `scrawl hyprland-snippet` for a permanent one)"),
-        None => println!("  shortcut: none"),
+    for (what, key) in [("record / stop", daemon::hotkey()), ("paste latest", daemon::paste_hotkey()), ("review latest", daemon::review_hotkey())] {
+        println!("  {what:<14} {}", key.map_or("off".into(), |k| daemon::pretty_key(&k)));
     }
+    println!("  (runtime binds added by the daemon; `scrawl hyprland-snippet` for permanent ones)");
     println!("  captures: {}", daemon::captures_dir().display());
     println!("  log:      {}", crate::capture::log_dir().join("scrawl.log").display());
     if bad > 0 {
         bail!("{bad} problem(s)");
+    }
+    Ok(())
+}
+
+/// A systemd user service for the daemon, tied to the graphical session like Omarchy's own: uwsm
+/// hands each Hyprland session's variables to the user manager, so none are written here.
+fn setup_service() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = dirs::config_dir().context("no config dir")?.join("systemd/user");
+    std::fs::create_dir_all(&dir)?;
+    let unit = dir.join("scrawl.service");
+    std::fs::write(
+        &unit,
+        format!(
+            "[Unit]\n\
+             Description=Scrawl (Hyprscrawl) capture daemon: Alt+Shift+S record, Alt+Shift+R review, Alt+Shift+V paste\n\
+             After=graphical-session.target\n\
+             PartOf=graphical-session.target\n\
+             ConditionEnvironment=WAYLAND_DISPLAY\n\
+             \n\
+             [Service]\n\
+             Type=simple\n\
+             ExecStart=\"{}\" daemon\n\
+             Restart=on-failure\n\
+             RestartSec=3\n\
+             \n\
+             [Install]\n\
+             WantedBy=graphical-session.target\n",
+            exe.display()
+        ),
+    )?;
+    println!("Wrote {}", unit.display());
+    // A daemon started by hand holds the lock; let the service take over.
+    let _ = daemon::send("quit", false);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    for args in [&["daemon-reload"][..], &["enable", "--now", "scrawl.service"][..]] {
+        let status = std::process::Command::new("systemctl").arg("--user").args(args).status()?;
+        if !status.success() {
+            bail!("systemctl --user {} failed", args.join(" "));
+        }
+    }
+    println!("Enabled scrawl.service: it starts with each Hyprland session. Status: systemctl --user status scrawl");
+    Ok(())
+}
+
+/// Desktop entries, so the app launcher (Omarchy's Super+Space) finds "Scrawl: Review Latest
+/// Capture" and "Scrawl: Record".
+fn setup_launcher() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = dirs::data_dir().context("no data dir")?.join("applications");
+    std::fs::create_dir_all(&dir)?;
+    for (file, name, args, comment) in [
+        ("scrawl-review.desktop", "Scrawl: Review Latest Capture", "preview latest", "Open the latest Scrawl capture: contact sheet, keyframes, transcript"),
+        ("scrawl-record.desktop", "Scrawl: Record", "toggle", "Start or finish a Scrawl recording"),
+    ] {
+        let path = dir.join(file);
+        std::fs::write(
+            &path,
+            format!(
+                "[Desktop Entry]\nType=Application\nName={name}\nComment={comment}\nExec=\"{}\" {args}\nIcon=camera-video\nTerminal=false\nCategories=Utility;\nKeywords=scrawl;capture;review;record;\n",
+                exe.display()
+            ),
+        )?;
+        println!("Added {}", path.display());
     }
     Ok(())
 }
